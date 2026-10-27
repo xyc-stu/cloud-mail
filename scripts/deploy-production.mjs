@@ -29,7 +29,7 @@ async function api(path, body) {
 
 export function verifyBindings(bindings, expected = process.env) {
   const get = key => bindings.find(x => x.name === key);
-  check(get('db')?.type === 'd1' && (get('db').id || get('db').database_id) === expected.D1_DATABASE_ID, 'D1 binding mismatch; refusing deployment');
+  check(get('db')?.type === 'd1' && (get('db').id || get('db').database_id) === expected.D1_DATABASE_ID, `D1 binding mismatch; refusing deployment (actual: ${JSON.stringify(get('db'))}; expected ID: ${expected.D1_DATABASE_ID})`);
   check(get('kv')?.type === 'kv_namespace' && get('kv').namespace_id === expected.KV_NAMESPACE_ID, 'KV binding mismatch; refusing deployment');
   check(get('r2')?.type === 'r2_bucket' && get('r2').bucket_name === expected.R2_BUCKET_NAME, 'R2 binding mismatch; refusing deployment');
   check(bindings.every(x => ['plain_text', 'json', 'secret_text', 'd1', 'kv_namespace', 'r2_bucket', 'ai', 'assets', 'send_email'].includes(x.type)), 'Unexpected binding type; review configuration');
