@@ -84,7 +84,7 @@ jobs:
       - name: Retain encrypted recovery backup before deployment
         uses: actions/upload-artifact@v4
         with:
-          name: encrypted-backup-${{ github.run_id }}
+          name: encrypted-backup-${{ github.run_id }}-${{ github.run_attempt }}
           path: .deployment-backup/*.enc.json
           include-hidden-files: true
           retention-days: 30

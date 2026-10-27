@@ -160,12 +160,16 @@ async function deploy() {
   check(after.bindings.find(x => x.name === 'jwt_secret')?.text === runtime.jwt, 'JWT secret changed during deployment');
   let initialized = false;
   // Never redirect the initialization URL, which contains a credential.
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 12; i++) {
     await pause(5000);
     try {
-      const response = await fetch(`https://${process.env.CUSTOM_DOMAIN}/api/init/${encodeURIComponent(runtime.jwt)}`, { redirect: 'error', signal: AbortSignal.timeout(90_000) });
-      if (response.ok && (await response.text()).trim() === 'success') { initialized = true; break; }
-    } catch { /* Avoid logging credential-bearing URLs. */ }
+      const response = await fetch(`https://${process.env.CUSTOM_DOMAIN}/api/init/${encodeURIComponent(runtime.jwt)}`, { redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(90_000) });
+      const text = (await response.text()).trim();
+      if (response.ok && text === 'success') { initialized = true; break; }
+      let code;
+      try { code = JSON.parse(text).code; } catch { /* No response text in logs. */ }
+      console.log(`Initialization attempt ${i + 1}: HTTP ${response.status}, content-type ${response.headers.get('content-type')}, API code ${typeof code === 'number' ? code : 'none'}`);
+    } catch (error) { console.log(`Initialization attempt ${i + 1}: ${error.name}; credential URL suppressed`); }
   }
   check(initialized, 'Database initialization failed; inspect recovery backup before retrying');
   const columns = await api(`/accounts/${account}/d1/database/${process.env.D1_DATABASE_ID}/query`, { sql: "PRAGMA table_info(email); PRAGMA table_info(setting);" });
