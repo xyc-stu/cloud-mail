@@ -1,6 +1,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { encryptBackup, decryptBackup, verifyBindings, activeDeploymentSettings } from './deploy-production.mjs';
+import { encryptBackup, decryptBackup, verifyBindings, activeDeploymentSettings, isEdgeDenied } from './deploy-production.mjs';
+import { restD1 } from './migrate-d1.mjs';
+
+test('D1 adapter preserves raw column order and parameterized batch statements', async () => {
+  const calls = [];
+  const api = async (path, body) => {
+    calls.push({ path, body });
+    if (path.endsWith('/raw')) return [{ success: true, results: { columns: ['b', 'a'], rows: [[2, 1]] } }];
+    return (body.batch || [body]).map(() => ({ success: true, results: [{ b: 2, a: 1 }] }));
+  };
+  const db = restD1(api, '/db');
+  assert.deepEqual(await db.prepare('SELECT b,a').raw(), [[2, 1]]);
+  assert.equal(await db.prepare('SELECT b,a').first('a'), 1);
+  await db.batch([db.prepare('SELECT ?').bind("a'b"), db.prepare('SELECT ?').bind(2)]);
+  assert.deepEqual(calls.at(-1).body.batch.map(x => x.params), [["a'b"], [2]]);
+});
+
+test('only an HTML 403 from the Cloudflare edge is classified as inconclusive', () => {
+  assert(isEdgeDenied(403, 'text/html; charset=UTF-8', true));
+  assert(!isEdgeDenied(403, 'application/json', true));
+  assert(!isEdgeDenied(500, 'text/html', true));
+  assert(!isEdgeDenied(403, 'text/html', false));
+});
 
 test('production bindings come from the deployed version, not an unbound latest upload', async () => {
   const bindings = [{ name: 'db', type: 'd1', database_id: 'production-db' }];

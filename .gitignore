@@ -29,4 +29,5 @@ mail-vue/dist
 .ci-bundle/
 mail-worker/.actions-runtime.json
 mail-worker/.actions-wrangler.json
+mail-worker/.actions-init.cjs
 git-tools.js

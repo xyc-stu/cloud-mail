@@ -34,10 +34,17 @@ It encrypts the export with AES-256-GCM and uploads only the encrypted backup
 artifact. The pipeline requires backup retention to succeed before deployment.
 Plaintext backups and credentials are never uploaded as public artifacts.
 
-After deployment, it invokes the project's database init endpoint without
-redirects, checks the v3.4 schema, verifies row counts and checks the homepage
-and public configuration API. Initialization success alone is not accepted as
+After deployment, it bundles and executes the project's unchanged database
+init module through authenticated D1/KV APIs, including the original Drizzle
+settings-cache refresh. This avoids sending a credential in a public URL and
+works when the site edge policy denies GitHub runner requests. It checks the
+v3.4 schema and row counts. Initialization success alone is not accepted as
 proof that all columns were migrated.
+
+Homepage and public configuration checks are attempted separately. An HTML
+403 from the Cloudflare edge is reported as inconclusive in the Actions step
+summary, not as a successful public test. In that case, check reachability
+from an allowed client. Other public HTTP/API failures still fail deployment.
 
 Download the `encrypted-backup-<run-id>` artifact before it expires (30 days).
 `decryptBackup` in `scripts/deploy-production.mjs` decrypts it using the saved

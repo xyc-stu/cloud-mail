@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { runProjectInit } from './migrate-d1.mjs';
 
 const account = process.env.CLOUDFLARE_ACCOUNT_ID;
 const name = process.env.NAME;
@@ -16,11 +17,11 @@ function mask(value) {
   if (process.env.GITHUB_ACTIONS && value) console.log(`::add-mask::${String(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
 }
 
-async function api(path, body) {
+async function api(path, body, options = {}) {
   const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: { Authorization: `Bearer ${required('CLOUDFLARE_API_TOKEN')}`, 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(60_000)
+    method: options.method || (body === undefined ? 'GET' : 'POST'),
+    headers: { Authorization: `Bearer ${required('CLOUDFLARE_API_TOKEN')}`, 'Content-Type': options.contentType || 'application/json' },
+    body: body === undefined ? undefined : options.raw ? body : JSON.stringify(body), signal: AbortSignal.timeout(60_000)
   });
   const data = await response.json();
   check(response.ok && data.success, `Cloudflare API failed (${response.status}) at ${path.split('?')[0]}; codes: ${(data.errors || []).map(x => x.code).join(',')}`);
@@ -158,32 +159,29 @@ async function deploy() {
   const after = (await activeDeploymentSettings()).settings;
   verifyBindings(after.bindings);
   check(after.bindings.find(x => x.name === 'jwt_secret')?.text === runtime.jwt, 'JWT secret changed during deployment');
-  let initialized = false;
-  // Never redirect the initialization URL, which contains a credential.
-  for (let i = 0; i < 12; i++) {
-    await pause(5000);
-    try {
-      const response = await fetch(`https://${process.env.CUSTOM_DOMAIN}/api/init/${encodeURIComponent(runtime.jwt)}`, { redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(90_000) });
-      const text = (await response.text()).trim();
-      if (response.ok && text === 'success') { initialized = true; break; }
-      let code;
-      try { code = JSON.parse(text).code; } catch { /* No response text in logs. */ }
-      console.log(`Initialization attempt ${i + 1}: HTTP ${response.status}, content-type ${response.headers.get('content-type')}, API code ${typeof code === 'number' ? code : 'none'}`);
-    } catch (error) { console.log(`Initialization attempt ${i + 1}: ${error.name}; credential URL suppressed`); }
-  }
-  check(initialized, 'Database initialization failed; inspect recovery backup before retrying');
+  await runProjectInit({ api, account, databaseId: process.env.D1_DATABASE_ID, namespaceId: process.env.KV_NAMESPACE_ID, jwt: runtime.jwt });
   const columns = await api(`/accounts/${account}/d1/database/${process.env.D1_DATABASE_ID}/query`, { sql: "PRAGMA table_info(email); PRAGMA table_info(setting);" });
   check(columns.every(x => x.success), 'Schema query failed');
   check(columns[0].results.some(x => x.name === 'sender_email'), 'v3.4.0 email migration did not complete');
   for (const column of ['sync_delete', 'github_client_id', 'auto_clean_days', 'webhook_url']) check(columns[1].results.some(x => x.name === column), `Missing migrated column: ${column}`);
   const counts = await tableCounts();
   for (const [table, previous] of Object.entries(runtime.beforeCounts)) check(counts[table] >= previous, `Row count decreased: ${table}`);
-  const homepage = await fetch(`https://${process.env.CUSTOM_DOMAIN}/`, { signal: AbortSignal.timeout(30_000) });
-  check(homepage.ok && (await homepage.text()).includes('<html'), 'Homepage verification failed');
-  const health = await fetch(`https://${process.env.CUSTOM_DOMAIN}/api/setting/websiteConfig`, { signal: AbortSignal.timeout(30_000) });
-  const data = await health.json();
-  check(health.ok && data.code === 200, 'Website configuration API verification failed');
-  console.log('Deployment, migration, original bindings and row counts verified.');
+  for (const path of ['/', '/api/setting/websiteConfig']) {
+    const response = await fetch(`https://${process.env.CUSTOM_DOMAIN}${path}`, { redirect: 'error', signal: AbortSignal.timeout(30_000) });
+    const text = await response.text();
+    if (isEdgeDenied(response.status, response.headers.get('content-type'), response.headers.has('cf-ray'))) {
+      const note = `Public check ${path}: runner denied by site edge policy (HTML 403); public reachability requires a separate check from an allowed client. Database, cache and bindings verified through authenticated API.`;
+      console.log(note);
+      if (process.env.GITHUB_STEP_SUMMARY) await writeFile(process.env.GITHUB_STEP_SUMMARY, `${note}\n`, { flag: 'a' });
+      continue;
+    }
+    check(response.ok && (path === '/' ? text.includes('<html') : JSON.parse(text).code === 200), `Public check failed: ${path}`);
+  }
+  console.log('Deployment, upstream database init/cache refresh, original bindings and row counts verified.');
+}
+
+export function isEdgeDenied(status, contentType, cloudflareRay) {
+  return status === 403 && Boolean(cloudflareRay) && Boolean(contentType?.startsWith('text/html'));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
