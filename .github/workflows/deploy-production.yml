@@ -1,0 +1,96 @@
+name: Deploy cloud-mail production
+on:
+  push:
+    branches: [main]
+    paths: ['mail-worker/**', 'mail-vue/**', 'scripts/**', '.github/workflows/deploy-production.yml']
+  pull_request:
+    paths: ['mail-worker/**', 'mail-vue/**', 'scripts/**', '.github/workflows/deploy-production.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cloud-mail-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: |
+            mail-worker/pnpm-lock.yaml
+            mail-vue/pnpm-lock.yaml
+      - name: Install locked dependencies
+        run: |
+          pnpm --dir mail-worker install --frozen-lockfile
+          pnpm --dir mail-vue install --frozen-lockfile
+      - name: Check deployment safeguards
+        run: node --test scripts/deploy-production.test.mjs
+      - name: Build frontend
+        run: pnpm --dir mail-vue run build
+      - name: Bundle Worker without deploying
+        working-directory: mail-worker
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: pnpm exec wrangler deploy --dry-run --config wrangler-ci.json --outdir ../.ci-bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-${{ github.sha }}
+          path: mail-worker/dist
+          retention-days: 3
+          if-no-files-found: error
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      NAME: ${{ vars.NAME }}
+      CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
+      DOMAIN: ${{ vars.DOMAIN }}
+      ADMIN: ${{ vars.ADMIN }}
+      D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
+      KV_NAMESPACE_ID: ${{ vars.KV_NAMESPACE_ID }}
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: mail-worker/pnpm-lock.yaml
+      - run: pnpm --dir mail-worker install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-${{ github.sha }}
+          path: mail-worker/dist
+      - name: Verify resources and encrypt database backup
+        run: node scripts/deploy-production.mjs prepare
+      - name: Retain encrypted recovery backup before deployment
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-backup-${{ github.run_id }}
+          path: .deployment-backup/*.enc.json
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+      - name: Deploy, migrate and verify
+        run: node scripts/deploy-production.mjs deploy
+      - name: Remove temporary runtime credentials
+        if: always()
+        run: rm -f mail-worker/.actions-runtime.json mail-worker/.actions-wrangler.json
