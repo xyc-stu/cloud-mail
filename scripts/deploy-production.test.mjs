@@ -1,6 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { encryptBackup, decryptBackup, verifyBindings } from './deploy-production.mjs';
+import { encryptBackup, decryptBackup, verifyBindings, activeDeploymentSettings } from './deploy-production.mjs';
+
+test('production bindings come from the deployed version, not an unbound latest upload', async () => {
+  const bindings = [{ name: 'db', type: 'd1', database_id: 'production-db' }];
+  const request = async path => {
+    if (path.endsWith('/deployments')) return { deployments: [{ versions: [{ version_id: 'active', percentage: 100 }] }] };
+    if (path.endsWith('/versions/active')) return { resources: { bindings, script_runtime: { compatibility_date: '2025-06-04' } } };
+    if (path.endsWith('/settings')) return { bindings: [], compatibility_date: '2026-10-27' };
+    throw new Error('Unexpected request');
+  };
+  const result = await activeDeploymentSettings(request);
+  assert.deepEqual(result.settings.bindings, bindings);
+  assert.equal(result.settings.compatibility_date, '2025-06-04');
+  assert.equal(result.versionId, 'active');
+});
 
 test('backup encryption detects tampering and wrong recovery keys', () => {
   const key = 'ab'.repeat(32);

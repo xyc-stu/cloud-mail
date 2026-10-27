@@ -27,6 +27,23 @@ async function api(path, body) {
   return data.result;
 }
 
+export async function activeDeploymentSettings(request = api) {
+  const deployments = await request(`${workerPath}/deployments`);
+  const current = deployments.deployments?.[0];
+  check(current?.versions?.length === 1 && current.versions[0].percentage === 100, 'Expected one production version serving all traffic');
+  const versionId = current.versions[0].version_id;
+  const version = await request(`${workerPath}/versions/${versionId}`);
+  const latest = await request(`${workerPath}/settings`);
+  // /settings can describe an undeployed upload. Bindings must come from the
+  // version actually serving traffic, including after a rollback.
+  const runtime = version.resources?.script_runtime;
+  check(runtime?.compatibility_date && Array.isArray(version.resources?.bindings), 'Production version metadata is incomplete');
+  return { versionId, deployments, version, settings: {
+    ...latest, compatibility_date: runtime.compatibility_date,
+    compatibility_flags: runtime.compatibility_flags || [], bindings: version.resources.bindings
+  } };
+}
+
 export function verifyBindings(bindings, expected = process.env) {
   const get = key => bindings.find(x => x.name === key);
   check(get('db')?.type === 'd1' && (get('db').id || get('db').database_id) === expected.D1_DATABASE_ID, `D1 binding mismatch; refusing deployment (actual: ${JSON.stringify(get('db'))}; expected ID: ${expected.D1_DATABASE_ID})`);
@@ -82,7 +99,8 @@ async function exportDatabase() {
 async function prepare() {
   ['CLOUDFLARE_ACCOUNT_ID', 'NAME', 'CUSTOM_DOMAIN', 'DOMAIN', 'ADMIN', 'D1_DATABASE_ID', 'KV_NAMESPACE_ID', 'R2_BUCKET_NAME', 'BACKUP_ENCRYPTION_KEY'].forEach(required);
   check(/^[a-z0-9-]+$/.test(name) && /^[a-z0-9.-]+$/i.test(process.env.CUSTOM_DOMAIN), 'Invalid Worker name or website hostname');
-  const settings = await api(`${workerPath}/settings`);
+  const active = await activeDeploymentSettings();
+  const settings = active.settings;
   verifyBindings(settings.bindings);
   const value = key => { const b = settings.bindings.find(x => x.name === key); return b?.type === 'json' ? b.json : b?.text; };
   const jwt = process.env.JWT_SECRET || value('jwt_secret');
@@ -95,7 +113,7 @@ async function prepare() {
   const domain = (await api(`/accounts/${account}/workers/domains`)).find(x => x.hostname === process.env.CUSTOM_DOMAIN && x.service === name);
   check(domain, 'Website domain is not attached to existing Worker');
   const db = await api(`/accounts/${account}/d1/database/${process.env.D1_DATABASE_ID}`);
-  const deployments = await api(`${workerPath}/deployments`);
+  const deployments = active.deployments;
   const schedules = await api(`${workerPath}/schedules`);
   const beforeCounts = await tableCounts();
   const backup = await exportDatabase();
@@ -117,16 +135,17 @@ async function prepare() {
     triggers: { crons: ['0 * * * *'] }, ...(sendEmail.length ? { send_email: sendEmail } : {})
   };
   await writeFile(configFile, JSON.stringify(config, null, 2), { mode: 0o600 });
-  await writeFile(runtimeFile, JSON.stringify({ jwt, beforeCounts }), { mode: 0o600 });
+  await writeFile(runtimeFile, JSON.stringify({ jwt, beforeCounts, versionId: active.versionId }), { mode: 0o600 });
   console.log('Existing resources verified; encrypted recovery backup created. No deployment yet.');
 }
 
 async function deploy() {
   const runtime = JSON.parse(await readFile(runtimeFile, 'utf8'));
   mask(runtime.jwt);
+  check((await activeDeploymentSettings()).versionId === runtime.versionId, 'Production changed after backup; refusing concurrent deployment');
   const child = spawnSync(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['exec', 'wrangler', 'deploy', '--config', '.actions-wrangler.json'], { cwd: 'mail-worker', stdio: 'inherit', env: process.env });
   check(!child.error && child.status === 0, 'Worker deployment failed; database initialization was not attempted');
-  const after = await api(`${workerPath}/settings`);
+  const after = (await activeDeploymentSettings()).settings;
   verifyBindings(after.bindings);
   check(after.bindings.find(x => x.name === 'jwt_secret')?.text === runtime.jwt, 'JWT secret changed during deployment');
   let initialized = false;
