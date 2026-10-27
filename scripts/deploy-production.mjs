@@ -23,7 +23,7 @@ async function api(path, body) {
     body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(60_000)
   });
   const data = await response.json();
-  check(response.ok && data.success, `Cloudflare API failed (${response.status}); codes: ${(data.errors || []).map(x => x.code).join(',')}`);
+  check(response.ok && data.success, `Cloudflare API failed (${response.status}) at ${path.split('?')[0]}; codes: ${(data.errors || []).map(x => x.code).join(',')}`);
   return data.result;
 }
 
@@ -106,6 +106,16 @@ async function prepare() {
   const jwt = process.env.JWT_SECRET || value('jwt_secret');
   check(jwt && jwt === value('jwt_secret'), 'Existing JWT secret must be preserved');
   mask(jwt);
+  const permissionErrors = [];
+  for (const [path, body] of [
+    [`/accounts/${account}/workers/domains`],
+    [`/accounts/${account}/d1/database/${process.env.D1_DATABASE_ID}`],
+    [`/accounts/${account}/d1/database/${process.env.D1_DATABASE_ID}/query`, { sql: 'SELECT 1;' }],
+    [`${workerPath}/schedules`]
+  ]) {
+    try { await api(path, body); } catch (error) { permissionErrors.push(error.message); }
+  }
+  check(permissionErrors.length === 0, permissionErrors.join('\n'));
   check(value('admin') === process.env.ADMIN, 'Administrator differs from existing deployment');
   const domains = JSON.parse(process.env.DOMAIN);
   const oldDomains = typeof value('domain') === 'string' ? JSON.parse(value('domain')) : value('domain');
