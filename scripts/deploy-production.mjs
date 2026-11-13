@@ -160,10 +160,15 @@ async function deploy() {
   verifyBindings(after.bindings);
   check(after.bindings.find(x => x.name === 'jwt_secret')?.text === runtime.jwt, 'JWT secret changed during deployment');
   await runProjectInit({ api, account, databaseId: process.env.D1_DATABASE_ID, namespaceId: process.env.KV_NAMESPACE_ID, jwt: runtime.jwt });
-  const columns = await api(`/accounts/${account}/d1/database/${process.env.D1_DATABASE_ID}/query`, { sql: "PRAGMA table_info(email); PRAGMA table_info(setting);" });
+  const columns = await api(`/accounts/${account}/d1/database/${process.env.D1_DATABASE_ID}/query`, {
+    sql: "PRAGMA table_info(email); PRAGMA table_info(setting); PRAGMA index_info(idx_email_user_create_time);"
+  });
   check(columns.every(x => x.success), 'Schema query failed');
   check(columns[0].results.some(x => x.name === 'sender_email'), 'v3.4.0 email migration did not complete');
   for (const column of ['sync_delete', 'github_client_id', 'auto_clean_days', 'webhook_url']) check(columns[1].results.some(x => x.name === column), `Missing migrated column: ${column}`);
+  const indexColumns = columns[2].results.map(column => column.name);
+  check(indexColumns.length === 2 && indexColumns[0] === 'user_id' && indexColumns[1] === 'create_time',
+    'v3.5.0 email index migration did not complete');
   const counts = await tableCounts();
   for (const [table, previous] of Object.entries(runtime.beforeCounts)) check(counts[table] >= previous, `Row count decreased: ${table}`);
   for (const path of ['/', '/api/setting/websiteConfig']) {

@@ -38,8 +38,8 @@ After deployment, it bundles and executes the project's unchanged database
 init module through authenticated D1/KV APIs, including the original Drizzle
 settings-cache refresh. This avoids sending a credential in a public URL and
 works when the site edge policy denies GitHub runner requests. It checks the
-v3.4 schema and row counts. Initialization success alone is not accepted as
-proof that all columns were migrated.
+required schema and row counts, including the v3.5.0 email index on
+`(user_id, create_time)`.
 
 Homepage and public configuration checks are attempted separately. An HTML
 403 from the Cloudflare edge is reported as inconclusive in the Actions step
@@ -51,13 +51,13 @@ Download the `encrypted-backup-<run-id>` artifact before it expires (30 days).
 key. Restore database and Worker version together after a failed migration;
 rolling back only Worker code does not undo a database schema change.
 
-The current migration target is upstream tag `v3.4.0`, commit
-`c0009ddae326197e22c44986b6537ca7d97e803a`. A merge commit connects the previous
-fork history and that release without force-pushing or deleting old commits.
-For future upgrades, merge a reviewed upstream release into a branch and open
-a PR. Keep `deploy-production.yml` and the scripts; do not re-enable the
-upstream deployment workflow or the previous Cloudflare Git build integration.
+The upgrade uses upstream tag `v3.5.0`, commit
+`cda76dcb96d05a12f102cfca751c3a10bb539d9d`. The upgrade commit records that
+tag as a parent. Merge the upgrade PR with a merge commit so later upstream
+merges can use the release as a common ancestor when upstream retains it.
+The repository deploys through `deploy-production.yml`.
 
-The v3.4 release runs its scheduled maintenance hourly. Existing Cloudflare
-email-sending bindings are retained; migration does not enable a new sending
-provider. Existing Email Routing rules remain attached to the same Worker.
+Scheduled maintenance runs hourly. The deployment generates its configuration
+from the active Worker's bindings. The v3.5.0 feature that forwards mail sent
+within Cloud Mail to a verified external address requires the `forward`
+email binding and a forwarding destination configured in the application.
